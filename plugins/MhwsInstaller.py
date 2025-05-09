@@ -4,30 +4,83 @@ import re
 import logging
 from collections import defaultdict
 from typing import Dict, List, Optional, Union, cast
+from dataclasses import dataclass
 
 from PyQt6 import QtWidgets, QtGui, QtCore
 from PyQt6.QtWidgets import QApplication
 
 import mobase
 
+@dataclass
+class GroupOption:
+    """表示分组选项的配置项"""
+    unique_name: str
+    display_name: str
+    description: str
+    preview: Optional[QtGui.QPixmap] = None
+
+@dataclass
+class GroupItem:
+    """表示一个选项分组"""
+    name: str
+    options: list[GroupOption]
 
 class ModOptionsDialog(QtWidgets.QDialog):
+    """选项选择对话框，用于显示和管理MOD安装选项"""
+
     def __init__(
         self,
-        options: list[tuple[str, Optional[QtGui.QPixmap], str]],
+        groups: list[GroupItem],
         parent: QtWidgets.QWidget | None = None,
         preselect: list[str] = None
     ):
+        """
+        初始化对话框
+        :param groups: 分组选项列表
+        :param parent: 父级窗口部件
+        :param preselect: 预设选中的选项唯一名称列表
+        """
         super().__init__(parent)
         self._selected_options: list[str] = []
-        self.preview_images = {name: preview for name, preview, _ in options}
-        self.modinfo_map = {name: modinfo for name, _, modinfo in options}
+        self.groups = groups
+        self.preselect = preselect or []
+        self.current_group_index = 0
 
+        # 创建选项映射关系
+        self.preview_map = {}
+        self.modinfo_map = {}
+        for group in groups:
+            for option in group.options:
+                self.preview_map[option.unique_name] = option.preview
+                self.modinfo_map[option.unique_name] = option.description
+
+        self.setup_ui()
+
+    def setup_ui(self):
+        """初始化用户界面布局"""
         self.setWindowTitle(self.tr("Select Options"))
-
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, self)
 
-        # 左侧图片显示区域（使用QGraphicsView）
+        self._setup_graphics_view(splitter)
+        right_widget = QtWidgets.QWidget()
+        right_layout = QtWidgets.QVBoxLayout(right_widget)
+
+        self._setup_title_label(right_layout)
+        self._setup_modinfo_text(right_layout)
+        self._setup_stacked_widget(right_layout)
+        self._setup_buttons(right_layout)
+
+        splitter.addWidget(right_widget)
+        main_layout = QtWidgets.QVBoxLayout(self)
+        main_layout.addWidget(splitter)
+
+        self.update_buttons()
+        if self.list_widgets:
+            self.list_widgets[0].setCurrentRow(0)
+            self.update_preview()
+
+    def _setup_graphics_view(self, splitter: QtWidgets.QSplitter):
+        """初始化左侧图片预览区域"""
         self.graphics_view = QtWidgets.QGraphicsView()
         self.graphics_view.setRenderHints(
             QtGui.QPainter.RenderHint.Antialiasing
@@ -46,12 +99,6 @@ class ModOptionsDialog(QtWidgets.QDialog):
         self.graphics_view.setHorizontalScrollBarPolicy(
             QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
-        self.graphics_view.setVerticalScrollBarPolicy(
-            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
-        self.graphics_view.setHorizontalScrollBarPolicy(
-            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
         self.graphics_view.viewport().setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
         self.graphics_view.viewport().installEventFilter(self)
 
@@ -61,39 +108,49 @@ class ModOptionsDialog(QtWidgets.QDialog):
         self.graphics_view.setMinimumSize(600, 600)
         splitter.addWidget(self.graphics_view)
 
-        # 右侧布局
-        right_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+    def _setup_title_label(self, layout: QtWidgets.QVBoxLayout):
+        """初始化分组标题标签"""
+        self.title_label = QtWidgets.QLabel(self.groups[self.current_group_index].name)
+        self.title_label.setStyleSheet("font-size: 20px; font-weight: bold; margin-bottom: 10px;")
+        layout.addWidget(self.title_label)
 
-        # modinfo信息显示
+    def _setup_modinfo_text(self, layout: QtWidgets.QVBoxLayout):
+        """初始化模组信息显示区域"""
         self.modinfo_text = QtWidgets.QTextEdit()
         self.modinfo_text.setReadOnly(True)
         self.modinfo_text.setStyleSheet("font-family: Consolas; font-size: 16px;")
-        right_splitter.addWidget(self.modinfo_text)
+        layout.addWidget(self.modinfo_text, stretch=1)
 
-        # 选项列表和按钮
-        bottom_widget = QtWidgets.QWidget()
-        bottom_layout = QtWidgets.QVBoxLayout(bottom_widget)
+    def _setup_stacked_widget(self, layout: QtWidgets.QVBoxLayout):
+        """初始化选项分页组件"""
+        self.stacked_widget = QtWidgets.QStackedWidget()
+        layout.addWidget(self.stacked_widget, stretch=6)
 
-        self.list_widget = QtWidgets.QListWidget()
-        self.list_widget.setSelectionMode(
-            QtWidgets.QAbstractItemView.SelectionMode.SingleSelection  # 修改为单选模式
-        )
-        bottom_layout.addWidget(self.list_widget)
+        self.list_widgets = []
+        for group in self.groups:
+            page_widget = QtWidgets.QWidget()
+            page_layout = QtWidgets.QVBoxLayout(page_widget)
 
-        # 添加带复选框的选项时设置初始勾选状态
-        for name, _, _ in options:
-            item = QtWidgets.QListWidgetItem(name)
-            item.setFlags(
-                QtCore.Qt.ItemFlag.ItemIsSelectable
-                | QtCore.Qt.ItemFlag.ItemIsEnabled
-                | QtCore.Qt.ItemFlag.ItemIsUserCheckable
+            list_widget = QtWidgets.QListWidget()
+            list_widget.setSelectionMode(
+                QtWidgets.QAbstractItemView.SelectionMode.SingleSelection
             )
-            # 根据 preselect 设置初始勾选状态
-            initial_state = QtCore.Qt.CheckState.Checked if name in preselect else QtCore.Qt.CheckState.Unchecked
-            item.setCheckState(initial_state)
-            self.list_widget.addItem(item)
+            for option in group.options:
+                item = QtWidgets.QListWidgetItem(option.display_name)
+                item.setData(QtCore.Qt.ItemDataRole.UserRole, option.unique_name)
+                item.setCheckState(
+                    QtCore.Qt.CheckState.Checked
+                    if option.unique_name in self.preselect
+                    else QtCore.Qt.CheckState.Unchecked
+                )
+                list_widget.addItem(item)
+            list_widget.itemSelectionChanged.connect(self.update_preview)
+            self.list_widgets.append(list_widget)
+            page_layout.addWidget(list_widget)
+            self.stacked_widget.addWidget(page_widget)
 
-        # 按钮区域
+    def _setup_buttons(self, layout: QtWidgets.QVBoxLayout):
+        """初始化底部操作按钮"""
         button_layout = QtWidgets.QHBoxLayout()
         self.select_all_btn = QtWidgets.QPushButton(self.tr("Select All"))
         self.select_all_btn.clicked.connect(self.select_all)
@@ -103,147 +160,147 @@ class ModOptionsDialog(QtWidgets.QDialog):
         self.deselect_btn.clicked.connect(self.deselect_all)
         button_layout.addWidget(self.deselect_btn)
 
-        self.ok_btn = QtWidgets.QPushButton(self.tr("OK"))
-        self.ok_btn.clicked.connect(self.accept)
-        button_layout.addWidget(self.ok_btn)
+        self.prev_btn = QtWidgets.QPushButton(self.tr("Previous"))
+        self.prev_btn.clicked.connect(self.prev_group)
+        button_layout.addWidget(self.prev_btn)
+
+        self.next_btn = QtWidgets.QPushButton(self.tr("Next"))
+        self.next_btn.clicked.connect(self.next_group)
+        button_layout.addWidget(self.next_btn)
 
         self.cancel_btn = QtWidgets.QPushButton(self.tr("Cancel"))
         self.cancel_btn.clicked.connect(self.reject)
         button_layout.addWidget(self.cancel_btn)
 
-        bottom_layout.addLayout(button_layout)
-        right_splitter.addWidget(bottom_widget)
-
-        splitter.addWidget(right_splitter)
-        main_layout = QtWidgets.QVBoxLayout(self)
-        main_layout.addWidget(splitter)
-
-        # 默认选中第一个并显示信息
-        if self.list_widget.count() > 0:
-            self.list_widget.setCurrentRow(0)
-            self.update_preview(self.list_widget.item(0))
-
-        # 连接点击事件
-        # self.list_widget.itemClicked.connect(self.update_preview)
-        self.list_widget.itemSelectionChanged.connect(self.update_preview)
+        layout.addLayout(button_layout)
 
     def eventFilter(self, source, event):
-        """拦截滚轮事件处理缩放"""
+        """处理图形视图的滚轮缩放事件"""
         if (
             source is self.graphics_view.viewport()
             and event.type() == QtCore.QEvent.Type.Wheel
         ):
             self.handle_wheel_zoom(event)
-            return True  # 阻止事件继续传递
+            return True
         return super().eventFilter(source, event)
 
-
     def handle_wheel_zoom(self, event: QtGui.QWheelEvent):
+        """处理鼠标滚轮缩放操作"""
         current_scale = self.graphics_view.transform().m11()
         zoom_factor = 1.001 ** event.angleDelta().y()
         new_scale = current_scale * zoom_factor
 
         if 0.01 <= new_scale <= 50:
-            # 在缩放前保存当前可视区域中心
             old_center = self.graphics_view.mapToScene(
                 self.graphics_view.viewport().rect().center()
             )
-
-            # 执行缩放
             self.graphics_view.scale(zoom_factor, zoom_factor)
-
-            # 计算图片是否小于视图
             view_rect = self.graphics_view.mapToScene(
                 self.graphics_view.viewport().rect()
             ).boundingRect()
             image_rect = self.scene.itemsBoundingRect()
-
-            # 如果图片完全在可视区域内则自动居中
             if view_rect.contains(image_rect):
                 self.graphics_view.centerOn(image_rect.center())
 
+    def update_buttons(self):
+        """更新导航按钮状态"""
+        self.prev_btn.setEnabled(self.current_group_index > 0)
+        if self.current_group_index == len(self.groups) - 1:
+            self.next_btn.setText(self.tr("Finish"))
+            self.next_btn.clicked.disconnect()
+            self.next_btn.clicked.connect(self.accept)
+        else:
+            self.next_btn.setText(self.tr("Next"))
+            self.next_btn.clicked.disconnect()
+            self.next_btn.clicked.connect(self.next_group)
+        self.title_label.setText(self.groups[self.current_group_index].name)
+
+    def next_group(self):
+        """切换到下一个选项分组"""
+        if self.current_group_index < len(self.groups) - 1:
+            self.current_group_index += 1
+            self.stacked_widget.setCurrentIndex(self.current_group_index)
+            self.update_buttons()
+            current_list = self.list_widgets[self.current_group_index]
+            if current_list.count() > 0:
+                current_list.setCurrentRow(0)
+
+    def prev_group(self):
+        """切换到上一个选项分组"""
+        if self.current_group_index > 0:
+            self.current_group_index -= 1
+            self.stacked_widget.setCurrentIndex(self.current_group_index)
+            self.update_buttons()
+            current_list = self.list_widgets[self.current_group_index]
+            if current_list.count() > 0:
+                current_list.setCurrentRow(0)
+
     def select_all(self):
-        """全选复选框"""
-        for i in range(self.list_widget.count()):
-            item = self.list_widget.item(i)
+        """全选当前分组的选项"""
+        current_list = self.list_widgets[self.current_group_index]
+        for i in range(current_list.count()):
+            item = current_list.item(i)
             item.setCheckState(QtCore.Qt.CheckState.Checked)
 
     def deselect_all(self):
-        """取消全选复选框"""
-        for i in range(self.list_widget.count()):
-            item = self.list_widget.item(i)
+        """取消全选当前分组的选项"""
+        current_list = self.list_widgets[self.current_group_index]
+        for i in range(current_list.count()):
+            item = current_list.item(i)
             item.setCheckState(QtCore.Qt.CheckState.Unchecked)
 
-    def update_preview(self, item: Optional[QtWidgets.QListWidgetItem] = None):
-        """更新预览图和modinfo信息"""
-        if item is None:
-            selected_items = self.list_widget.selectedItems()
-            if not selected_items:
-                return
-            item = selected_items[0]
+    def update_preview(self):
+        """更新选项预览图和详细信息"""
+        current_list = self.list_widgets[self.current_group_index]
+        selected_items = current_list.selectedItems()
+        if not selected_items:
+            return
+        item = selected_items[0]
+        unique_name = item.data(QtCore.Qt.ItemDataRole.UserRole)
 
-        name = item.text()
-
-        # 清空原有场景
         self.scene.clear()
-
-        # 更新预览图
-        preview = self.preview_images.get(name)
+        preview = self.preview_map.get(unique_name)
         if preview:
-            # 创建可缩放的图形项
             pixmap_item = QtWidgets.QGraphicsPixmapItem(preview)
-            self.scene.addItem(pixmap_item)
-
-            # 将图片居中
             pixmap_item.setTransformationMode(QtCore.Qt.TransformationMode.SmoothTransformation)
-            pixmap_item.setPos(
-                -preview.width() / 2, -preview.height() / 2
-            )  # 设置图片中心为场景中心
-
-            # 自动适应视图大小
+            pixmap_item.setPos(-preview.width()/2, -preview.height()/2)
+            self.scene.addItem(pixmap_item)
             self.graphics_view.fitInView(pixmap_item, QtCore.Qt.AspectRatioMode.KeepAspectRatio)
         else:
-            # 显示文本提示
-            text_item = self.scene.addText("无可用预览")
+            text_item = self.scene.addText(self.tr("无可用预览"))
             text_item.setDefaultTextColor(QtGui.QColor("#FFFFFF"))
-            # 将文本居中
-            text_item.setPos(
-                -text_item.boundingRect().width() / 2,
-                -text_item.boundingRect().height() / 2,
-            )
+            text_item.setPos(-text_item.boundingRect().width()/2, -text_item.boundingRect().height()/2)
 
-        # 更新modinfo信息（保持原有逻辑）
-        self.modinfo_text.setPlainText(self.modinfo_map.get(name, "无modinfo信息"))
+        self.modinfo_text.setPlainText(self.modinfo_map.get(unique_name, self.tr("无modinfo信息")))
 
     def resizeEvent(self, event: QtGui.QResizeEvent):
-        """窗口大小变化时自动调整视图"""
+        """窗口大小变化事件处理"""
         super().resizeEvent(event)
         if self.scene.items():
             self.graphics_view.fitInView(self.scene.itemsBoundingRect(),
                                        QtCore.Qt.AspectRatioMode.KeepAspectRatio)
+
     def selected_options(self) -> list[str]:
-        """获取勾选的选项"""
+        """获取所有选中的选项唯一名称"""
         selected = []
-        for i in range(self.list_widget.count()):
-            item = self.list_widget.item(i)
-            if item.checkState() == QtCore.Qt.CheckState.Checked:
-                selected.append(item.text())
+        for list_widget in self.list_widgets:
+            for i in range(list_widget.count()):
+                item = list_widget.item(i)
+                if item.checkState() == QtCore.Qt.CheckState.Checked:
+                    selected.append(item.data(QtCore.Qt.ItemDataRole.UserRole))
         return selected
+
     def tr(self, value: str) -> str:
-        # we need this to translate string in Python. Check the common documentation
-        # for more details
+        """国际化翻译方法"""
         return QApplication.translate("ModOptionsDialog", value)
 
-
 class MhwsInstaller(mobase.IPluginInstallerSimple):
+    """MOD安装器核心类，实现MO2插件接口"""
 
-    # regex used to parse settings
     RE_DESCRIPTION = re.compile(r"select([0-9]+)-description")
     RE_OPTION = re.compile(r"select([0-9]+)-option([0-9]+)")
 
     _organizer: mobase.IOrganizer
-
-    # list of selected options
     _installerOptions: Dict[str, List[str]]
     _installerUsed: bool
 
@@ -260,10 +317,10 @@ class MhwsInstaller(mobase.IPluginInstallerSimple):
         self._logger.setLevel(logging.DEBUG)
 
     def init(self, organizer: mobase.IOrganizer):
+        """插件初始化方法"""
         self._organizer = organizer
         translator = QtCore.QTranslator()
         translator.load("MhwsInstaller_zh_CN.qm")
-
         return True
 
     def name(self):
@@ -289,12 +346,12 @@ class MhwsInstaller(mobase.IPluginInstallerSimple):
             mobase.PluginSetting("enabled", "check to enable this plugin", True),
         ]
 
-    # method for IPluginInstallerSimple
-
     def priority(self) -> int:
+        """返回安装器优先级"""
         return 999
 
     def isManualInstaller(self) -> bool:
+        """返回是否是手动安装器"""
         return False
 
     def onInstallationStart(
@@ -303,6 +360,7 @@ class MhwsInstaller(mobase.IPluginInstallerSimple):
         reinstallation: bool,
         current_mod: Optional[mobase.IModInterface],
     ):
+        """安装开始时的回调方法"""
         self._installerUsed = False
         self._installerOptions = {}
         self.current_mod = current_mod
@@ -310,8 +368,8 @@ class MhwsInstaller(mobase.IPluginInstallerSimple):
     def onInstallationEnd(
         self, result: mobase.InstallResult, new_mod: Optional[mobase.IModInterface]
     ):
+        """安装结束时的回调方法"""
         self.new_mod = new_mod
-        # === 新增配置保存逻辑 ===
         if (
             result == mobase.InstallResult.SUCCESS
             and self._pending_selected_options is not None
@@ -323,7 +381,8 @@ class MhwsInstaller(mobase.IPluginInstallerSimple):
                 self._pending_selected_options
             )
             self._logger.debug(f"配置已保存到 {self.new_mod.name()}: {self._pending_selected_options}")
-            self._pending_selected_options = None  # 清空临时存储
+            self._pending_selected_options = None
+
         if (
             result != mobase.InstallResult.SUCCESS
             or not self._installerUsed
@@ -337,13 +396,6 @@ class MhwsInstaller(mobase.IPluginInstallerSimple):
             for iopt, opt in enumerate(self._installerOptions[desc]):
                 new_mod.setPluginSetting(self.name(), f"select{i}-option{iopt}", opt)
 
-    def _hasFomodInstaller(self) -> bool:
-        # do not consider the NCC installer
-        return self._organizer.isPluginEnabled("Fomod Installer")
-
-    def _hasOmodInstaller(self) -> bool:
-        return self._organizer.isPluginEnabled("Omod Installer")
-
     def _getWizardArchiveBase(
         self, tree: mobase.IFileTree, data_name: str, checker: mobase.ModDataChecker
     ) -> Union[
@@ -351,9 +403,9 @@ class MhwsInstaller(mobase.IPluginInstallerSimple):
         List[tuple[mobase.IFileTree, Optional[QtGui.QPixmap], dict]],
         None
     ]:
-
+        """解析压缩包结构并获取有效选项数据"""
         def read_modinfo(entry: mobase.IFileTree) -> dict:
-            """读取modinfo.ini内容并返回属性字典"""
+            """读取modinfo配置文件"""
             modinfo_entry = entry.find("modinfo.ini", mobase.FileTreeEntry.FILE)
             if modinfo_entry:
                 try:
@@ -364,7 +416,7 @@ class MhwsInstaller(mobase.IPluginInstallerSimple):
                             line = line.strip()
                             if line and '=' in line:
                                 key, value = line.split('=', 1)
-                                key = key.strip().lower()  # 统一小写处理键
+                                key = key.strip().lower()
                                 value = value.strip()
                                 properties[key] = value
                     return properties
@@ -373,38 +425,33 @@ class MhwsInstaller(mobase.IPluginInstallerSimple):
             return {}
 
         def find_preview(current_tree: mobase.IFileTree) -> Optional[QtGui.QPixmap]:
+            """查找预览图片"""
             for entry in current_tree:
                 if entry.isFile() and entry.suffix().lower() in ["jpg", "jpeg", "png"]:
                     try:
                         paths = self._manager().extractFile(entry, silent=False)
-                        self._logger.debug(f"找到备用预览图: {paths}")
                         data= open(paths, 'rb').read()
                         if not data:
                             continue
                         pixmap = QtGui.QPixmap()
                         if pixmap.loadFromData(data):
-                            self._logger.debug(f"找到备用预览图: {entry.name()}")
                             return pixmap
                     except Exception as e:
                         self._logger.error(f"加载备用预览图失败 {entry.name()}: {str(e)}")
             return None
 
-        # 1. 检查当前层级是否直接包含 modinfo.ini
+        # 根目录检查
         entry = tree.find("modinfo.ini", mobase.FileTreeEntry.FILE)
         if entry:
-            self._logger.debug(
-                "Found modinfo.ini at the root level. Single-option mod detected."
-            )
             preview = find_preview(tree)
             modinfo_text = read_modinfo(tree)
             return (tree, preview, modinfo_text)
 
-        # 2. 如果当前层级只包含一个文件夹，进入该文件夹继续检查
+        # 单文件夹检查
         if len(tree) == 1 and isinstance((root := tree[0]), mobase.IFileTree):
-            self._logger.debug("Only one folder found, entering the folder.")
             return self._getWizardArchiveBase(root, data_name, checker)
 
-        # 3. 多选模式处理
+        # 多选项处理
         option_trees = []
         for entry in tree:
             if entry.isDir():
@@ -416,37 +463,12 @@ class MhwsInstaller(mobase.IPluginInstallerSimple):
 
         return option_trees if option_trees else None
 
-        self._logger.debug("No valid modinfo.ini found.")
-        return None
-
-    # def _getFluffyModArchiveBase
     def isArchiveSupported(self, tree: mobase.IFileTree) -> bool:
-        """
-        Check if the given file-tree (from the archive) can be installed by this
-        installer.
-
-        Args:
-            tree: The tree to check.
-
-        Returns:
-            True if the file-tree can be installed, false otherwise.
-        """
-
-        # retrieve the name of the "data" folder
+        """判断是否支持当前压缩包格式"""
         data_name = self._organizer.managedGame().dataDirectory().dirName()
-
-        # retrieve the mod-data-checker
         checker = self._organizer.gameFeatures().gameFeature(mobase.ModDataChecker)
-
-        # retrieve the base
         base = self._getWizardArchiveBase(tree, data_name, checker)
-        # self._logger.error(f"{tree} + {data_name} + {checker} + {base}")
-        # tree_structure = self._log_tree_structure(tree)
-        # self._logger.error(f"File tree structure:\n{tree_structure}")
-
-        if not base:
-            return False
-        return True
+        return base is not None
 
     def install(
         self,
@@ -455,16 +477,10 @@ class MhwsInstaller(mobase.IPluginInstallerSimple):
         version: str,
         nexus_id: int,
     ) -> Union[mobase.InstallResult, mobase.IFileTree]:
-        self._logger.debug("Start install")
-
-        # 通过名称查找已安装MOD
+        """执行安装过程"""
+        self._logger.debug("开始安装流程")
         mod_name = str(name)
-        self._logger.debug(mod_name)
-        existing_mod = self._organizer.modList().getMod(mod_name)
-
-        if not self.current_mod and existing_mod:
-            self.current_mod = existing_mod
-            self._logger.debug(f"通过名称匹配到已安装MOD: {mod_name}")
+        self._initialize_current_mod(mod_name)
 
         data_name = self._organizer.managedGame().dataDirectory().dirName()
         checker = self._organizer.gameFeatures().gameFeature(mobase.ModDataChecker)
@@ -473,103 +489,97 @@ class MhwsInstaller(mobase.IPluginInstallerSimple):
         if not base:
             return mobase.InstallResult.NOT_ATTEMPTED
 
-        # 处理单选项
         if isinstance(base, tuple):
-            mod_tree, preview, modinfo = base
-            new_tree = tree.createOrphanTree()
-            new_tree.merge(mod_tree)
-            # 清理根目录文件
-            for entry in list(new_tree):
-                if entry.isFile() and entry.suffix().lower() in {"ini", "jpg", "png"}:
-                    new_tree.remove(entry.name())
-            return new_tree
+            return self._handle_single_option(tree, base)
 
-        # 处理多选项
         if isinstance(base, list):
-            options_data = []
-            # === 新增调试日志 ===
-            self._logger.debug(f"当前MOD实例: {self.current_mod}")
-            if self.current_mod:
-                raw_selected = self.current_mod.pluginSetting(self.name(), "selected_options")
-                self._logger.debug(f"原始读取值: {raw_selected} (类型: {type(raw_selected)})")
-                previous_selected = raw_selected or []
-                self._logger.debug(f"解析后的历史选中项: {previous_selected}")
-            else:
-                previous_selected = []
-                self._logger.debug("无已安装MOD，不加载历史配置")
-            # ====================
-
-            for entry, preview, modinfo in base:
-                display_name = modinfo.get('name', entry.name())
-                options_data.append({
-                    'display_name': display_name,
-                    'preview': preview,
-                    'modinfo': modinfo,
-                    'entry': entry
-                })
-            # === 新增：记录所有可用选项 ===
-            all_options = [x['display_name'] for x in options_data]
-            self._logger.debug(f"可用选项列表: {all_options}")
-            # ========================
-            # 按name属性排序
-            options_data.sort(key=lambda x: x['display_name'].lower())
-
-            # === 新增：验证历史配置有效性 ===
-            valid_selected = [name for name in previous_selected if name in all_options]
-            invalid_selected = list(set(previous_selected) - set(valid_selected))
-            if invalid_selected:
-                self._logger.warning(f"发现无效历史选项: {invalid_selected}")
-            # ========================
-            # 生成对话框选项（名称、预览、处理后的描述文本）
-            options_with_info = []
-            for data in options_data:
-                description = data['modinfo'].get('description', '无描述信息')
-                description = description.replace('\\n', '\n')  # 转换\n为实际换行
-                options_with_info.append((
-                    data['display_name'],
-                    data['preview'],
-                    description
-                ))
-
-            # 创建对话框时传递预设选中的选项名列表
-            self._logger.debug(f"传递给对话框的预设选项: {valid_selected}")
-            dialog = ModOptionsDialog(
-                options_with_info,
-                self._parentWidget(),
-                preselect=valid_selected  # 使用校验后的有效选项
-            )
-
-            if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
-                selected_names = dialog.selected_options()
-                self._pending_selected_options = selected_names  # 临时保存
-                self._logger.debug(f"暂存用户选择: {selected_names}")
-            else:
-                return mobase.InstallResult.CANCELED
-
-            selected_names = dialog.selected_options()
-            new_tree = tree.createOrphanTree()
-
-            # 合并选中的entry
-            for name in selected_names:
-                for data in options_data:
-                    if data['display_name'] == name:
-                        new_tree.merge(data['entry'])
-                        break
-
-            # 清理根目录文件
-            for entry in list(new_tree):
-                if entry.isFile() and entry.suffix().lower() in {"ini", "jpg", "png"}:
-                    new_tree.remove(entry.name())
-
-            return new_tree
+            return self._handle_multiple_options(tree, base)
 
         return mobase.InstallResult.NOT_ATTEMPTED
 
-    def tr(self, value: str) -> str:
-        # we need this to translate string in Python. Check the common documentation
-        # for more details
-        return QApplication.translate("MhwsInstaller", value)
+    def _initialize_current_mod(self, mod_name: str):
+        """初始化当前MOD实例"""
+        existing_mod = self._organizer.modList().getMod(mod_name)
+        if not self.current_mod and existing_mod:
+            self.current_mod = existing_mod
 
+    def _handle_single_option(
+        self, tree: mobase.IFileTree, base: tuple
+    ) -> mobase.IFileTree:
+        """处理单选项安装"""
+        mod_tree, preview, modinfo = base
+        new_tree = tree.createOrphanTree()
+        new_tree.merge(mod_tree)
+        self._clean_root_files(new_tree)
+        return new_tree
+
+    def _handle_multiple_options(
+        self, tree: mobase.IFileTree, base: list
+    ) -> Union[mobase.InstallResult, mobase.IFileTree]:
+        """处理多选项安装"""
+        options_data = self._prepare_options_data(base)
+        groups, unique_name_map = self._group_options(options_data)
+        previous_selected = self._load_previous_selection()
+
+        dialog = ModOptionsDialog(groups, self._parentWidget(), previous_selected)
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            return self._merge_selected_options(tree, dialog.selected_options(), unique_name_map)
+        return mobase.InstallResult.CANCELED
+
+    def _prepare_options_data(self, base: list) -> list:
+        """准备选项显示数据"""
+        return [{
+            'display_name': entry[2].get('name', entry[0].name()),
+            'preview': entry[1],
+            'modinfo': entry[2],
+            'entry': entry[0]
+        } for entry in base]
+
+    def _group_options(self, options_data: list) -> tuple[list[GroupItem], dict]:
+        """分组处理安装选项"""
+        grouped_options = defaultdict(list)
+        unique_name_map = {}
+
+        for data in options_data:
+            group_name = data['modinfo'].get('nameasbundle', 'default')
+            unique_name = f"{group_name}:{data['display_name']}"
+            grouped_options[group_name].append(GroupOption(
+                unique_name=unique_name,
+                display_name=data['display_name'],
+                description=data['modinfo'].get('description', '无描述信息').replace('\\n', '\n'),
+                preview=data['preview']
+            ))
+            unique_name_map[unique_name] = data['entry']
+
+        groups = [GroupItem(name=k, options=v) for k, v in grouped_options.items()]
+        return groups, unique_name_map
+
+    def _load_previous_selection(self) -> list:
+        """加载历史选中项"""
+        if self.current_mod:
+            return self.current_mod.pluginSetting(self.name(), "selected_options") or []
+        return []
+
+    def _merge_selected_options(
+        self, tree: mobase.IFileTree, selected_names: list, unique_name_map: dict
+    ) -> mobase.IFileTree:
+        """合并用户选择的选项到文件树"""
+        self._pending_selected_options = selected_names
+        new_tree = tree.createOrphanTree()
+        for unique_name in selected_names:
+            if entry := unique_name_map.get(unique_name):
+                new_tree.merge(entry)
+        self._clean_root_files(new_tree)
+        return new_tree
+
+    def _clean_root_files(self, tree: mobase.IFileTree):
+        """清理根目录临时文件"""
+        for entry in list(tree):
+            if entry.isFile() and entry.suffix().lower() in {"ini", "jpg", "png"}:
+                tree.remove(entry.name())
+
+    def tr(self, value: str) -> str:
+        return QApplication.translate("MhwsInstaller", value)
 
 def createPlugin() -> MhwsInstaller:
     return MhwsInstaller()
