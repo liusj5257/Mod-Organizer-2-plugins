@@ -2,7 +2,7 @@ import mobase
 import os
 import logging
 import uuid
-import re  # 引入正则表达式优化文件名解析
+import re
 from typing import List, Dict
 from pathlib import Path
 from PyQt6.QtCore import QDir

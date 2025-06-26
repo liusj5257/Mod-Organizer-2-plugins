@@ -11,19 +11,24 @@ from PyQt6.QtWidgets import QApplication
 
 import mobase
 
+
 @dataclass
 class GroupOption:
     """表示分组选项的配置项"""
+
     unique_name: str
     display_name: str
     description: str
     preview: Optional[QtGui.QPixmap] = None
 
+
 @dataclass
 class GroupItem:
     """表示一个选项分组"""
+
     name: str
     options: list[GroupOption]
+
 
 class ModOptionsDialog(QtWidgets.QDialog):
     """选项选择对话框，用于显示和管理MOD安装选项"""
@@ -32,7 +37,7 @@ class ModOptionsDialog(QtWidgets.QDialog):
         self,
         groups: list[GroupItem],
         parent: QtWidgets.QWidget | None = None,
-        preselect: list[str] = None
+        preselect: list[str] = None,
     ):
         """
         初始化对话框
@@ -111,7 +116,9 @@ class ModOptionsDialog(QtWidgets.QDialog):
     def _setup_title_label(self, layout: QtWidgets.QVBoxLayout):
         """初始化分组标题标签"""
         self.title_label = QtWidgets.QLabel(self.groups[self.current_group_index].name)
-        self.title_label.setStyleSheet("font-size: 20px; font-weight: bold; margin-bottom: 10px;")
+        self.title_label.setStyleSheet(
+            "font-size: 20px; font-weight: bold; margin-bottom: 10px;"
+        )
         layout.addWidget(self.title_label)
 
     def _setup_modinfo_text(self, layout: QtWidgets.QVBoxLayout):
@@ -262,23 +269,34 @@ class ModOptionsDialog(QtWidgets.QDialog):
         preview = self.preview_map.get(unique_name)
         if preview:
             pixmap_item = QtWidgets.QGraphicsPixmapItem(preview)
-            pixmap_item.setTransformationMode(QtCore.Qt.TransformationMode.SmoothTransformation)
-            pixmap_item.setPos(-preview.width()/2, -preview.height()/2)
+            pixmap_item.setTransformationMode(
+                QtCore.Qt.TransformationMode.SmoothTransformation
+            )
+            pixmap_item.setPos(-preview.width() / 2, -preview.height() / 2)
             self.scene.addItem(pixmap_item)
-            self.graphics_view.fitInView(pixmap_item, QtCore.Qt.AspectRatioMode.KeepAspectRatio)
+            self.graphics_view.fitInView(
+                pixmap_item, QtCore.Qt.AspectRatioMode.KeepAspectRatio
+            )
         else:
             text_item = self.scene.addText(self.tr("无可用预览"))
             text_item.setDefaultTextColor(QtGui.QColor("#FFFFFF"))
-            text_item.setPos(-text_item.boundingRect().width()/2, -text_item.boundingRect().height()/2)
+            text_item.setPos(
+                -text_item.boundingRect().width() / 2,
+                -text_item.boundingRect().height() / 2,
+            )
 
-        self.modinfo_text.setPlainText(self.modinfo_map.get(unique_name, self.tr("无modinfo信息")))
+        self.modinfo_text.setPlainText(
+            self.modinfo_map.get(unique_name, self.tr("无modinfo信息"))
+        )
 
     def resizeEvent(self, event: QtGui.QResizeEvent):
         """窗口大小变化事件处理"""
         super().resizeEvent(event)
         if self.scene.items():
-            self.graphics_view.fitInView(self.scene.itemsBoundingRect(),
-                                       QtCore.Qt.AspectRatioMode.KeepAspectRatio)
+            self.graphics_view.fitInView(
+                self.scene.itemsBoundingRect(),
+                QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+            )
 
     def selected_options(self) -> list[str]:
         """获取所有选中的选项唯一名称"""
@@ -293,6 +311,7 @@ class ModOptionsDialog(QtWidgets.QDialog):
     def tr(self, value: str) -> str:
         """国际化翻译方法"""
         return QApplication.translate("ModOptionsDialog", value)
+
 
 class MhwsInstaller(mobase.IPluginInstallerSimple):
     """MOD安装器核心类，实现MO2插件接口"""
@@ -376,11 +395,11 @@ class MhwsInstaller(mobase.IPluginInstallerSimple):
             and self.new_mod is not None
         ):
             self.new_mod.setPluginSetting(
-                self.name(),
-                "selected_options",
-                self._pending_selected_options
+                self.name(), "selected_options", self._pending_selected_options
             )
-            self._logger.debug(f"配置已保存到 {self.new_mod.name()}: {self._pending_selected_options}")
+            self._logger.debug(
+                f"配置已保存到 {self.new_mod.name()}: {self._pending_selected_options}"
+            )
             self._pending_selected_options = None
 
         if (
@@ -396,14 +415,13 @@ class MhwsInstaller(mobase.IPluginInstallerSimple):
             for iopt, opt in enumerate(self._installerOptions[desc]):
                 new_mod.setPluginSetting(self.name(), f"select{i}-option{iopt}", opt)
 
-    def _getWizardArchiveBase(
-        self, tree: mobase.IFileTree, data_name: str, checker: mobase.ModDataChecker
-    ) -> Union[
+    def _getWizardArchiveBase(self, tree: mobase.IFileTree, data_name: str) -> Union[
         tuple[mobase.IFileTree, Optional[QtGui.QPixmap], dict],
         List[tuple[mobase.IFileTree, Optional[QtGui.QPixmap], dict]],
-        None
+        None,
     ]:
         """解析压缩包结构并获取有效选项数据"""
+
         def read_modinfo(entry: mobase.IFileTree) -> dict:
             """读取modinfo配置文件"""
             modinfo_entry = entry.find("modinfo.ini", mobase.FileTreeEntry.FILE)
@@ -411,11 +429,11 @@ class MhwsInstaller(mobase.IPluginInstallerSimple):
                 try:
                     paths = self._manager().extractFile(modinfo_entry, silent=True)
                     properties = {}
-                    with open(paths, 'r', encoding='utf-8') as f:
+                    with open(paths, "r", encoding="utf-8") as f:
                         for line in f:
                             line = line.strip()
-                            if line and '=' in line:
-                                key, value = line.split('=', 1)
+                            if line and "=" in line:
+                                key, value = line.split("=", 1)
                                 key = key.strip().lower()
                                 value = value.strip()
                                 properties[key] = value
@@ -430,14 +448,16 @@ class MhwsInstaller(mobase.IPluginInstallerSimple):
                 if entry.isFile() and entry.suffix().lower() in ["jpg", "jpeg", "png"]:
                     try:
                         paths = self._manager().extractFile(entry, silent=False)
-                        data= open(paths, 'rb').read()
+                        data = open(paths, "rb").read()
                         if not data:
                             continue
                         pixmap = QtGui.QPixmap()
                         if pixmap.loadFromData(data):
                             return pixmap
                     except Exception as e:
-                        self._logger.error(f"加载备用预览图失败 {entry.name()}: {str(e)}")
+                        self._logger.error(
+                            f"加载备用预览图失败 {entry.name()}: {str(e)}"
+                        )
             return None
 
         # 根目录检查
@@ -449,7 +469,7 @@ class MhwsInstaller(mobase.IPluginInstallerSimple):
 
         # 单文件夹检查
         if len(tree) == 1 and isinstance((root := tree[0]), mobase.IFileTree):
-            return self._getWizardArchiveBase(root, data_name, checker)
+            return self._getWizardArchiveBase(root, data_name)
 
         # 多选项处理
         option_trees = []
@@ -466,8 +486,7 @@ class MhwsInstaller(mobase.IPluginInstallerSimple):
     def isArchiveSupported(self, tree: mobase.IFileTree) -> bool:
         """判断是否支持当前压缩包格式"""
         data_name = self._organizer.managedGame().dataDirectory().dirName()
-        checker = self._organizer.gameFeatures().gameFeature(mobase.ModDataChecker)
-        base = self._getWizardArchiveBase(tree, data_name, checker)
+        base = self._getWizardArchiveBase(tree, data_name)
         return base is not None
 
     def install(
@@ -483,8 +502,7 @@ class MhwsInstaller(mobase.IPluginInstallerSimple):
         self._initialize_current_mod(mod_name)
 
         data_name = self._organizer.managedGame().dataDirectory().dirName()
-        checker = self._organizer.gameFeatures().gameFeature(mobase.ModDataChecker)
-        base = self._getWizardArchiveBase(tree, data_name, checker)
+        base = self._getWizardArchiveBase(tree, data_name)
 
         if not base:
             return mobase.InstallResult.NOT_ATTEMPTED
@@ -523,17 +541,22 @@ class MhwsInstaller(mobase.IPluginInstallerSimple):
 
         dialog = ModOptionsDialog(groups, self._parentWidget(), previous_selected)
         if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
-            return self._merge_selected_options(tree, dialog.selected_options(), unique_name_map)
+            return self._merge_selected_options(
+                tree, dialog.selected_options(), unique_name_map
+            )
         return mobase.InstallResult.CANCELED
 
     def _prepare_options_data(self, base: list) -> list:
         """准备选项显示数据"""
-        return [{
-            'display_name': entry[2].get('name', entry[0].name()),
-            'preview': entry[1],
-            'modinfo': entry[2],
-            'entry': entry[0]
-        } for entry in base]
+        return [
+            {
+                "display_name": entry[2].get("name", entry[0].name()),
+                "preview": entry[1],
+                "modinfo": entry[2],
+                "entry": entry[0],
+            }
+            for entry in base
+        ]
 
     def _group_options(self, options_data: list) -> tuple[list[GroupItem], dict]:
         """分组处理安装选项"""
@@ -541,15 +564,22 @@ class MhwsInstaller(mobase.IPluginInstallerSimple):
         unique_name_map = {}
 
         for data in options_data:
-            group_name = data['modinfo'].get('nameasbundle', 'default')
+            group_name = data["modinfo"].get("nameasbundle", "default")
             unique_name = f"{group_name}:{data['display_name']}"
-            grouped_options[group_name].append(GroupOption(
-                unique_name=unique_name,
-                display_name=data['display_name'],
-                description=data['modinfo'].get('description', '无描述信息').replace('\\n', '\n'),
-                preview=data['preview']
-            ))
-            unique_name_map[unique_name] = data['entry']
+            grouped_options[group_name].append(
+                GroupOption(
+                    unique_name=unique_name,
+                    display_name=data["display_name"],
+                    description=data["modinfo"]
+                    .get("description", "无描述信息")
+                    .replace("\\n", "\n"),
+                    preview=data["preview"],
+                )
+            )
+            unique_name_map[unique_name] = data["entry"]
+
+        for group_name, options in grouped_options.items():
+            grouped_options[group_name] = sorted(options, key=lambda x: x.display_name)
 
         groups = [GroupItem(name=k, options=v) for k, v in grouped_options.items()]
         return groups, unique_name_map
@@ -580,6 +610,7 @@ class MhwsInstaller(mobase.IPluginInstallerSimple):
 
     def tr(self, value: str) -> str:
         return QApplication.translate("MhwsInstaller", value)
+
 
 def createPlugin() -> MhwsInstaller:
     return MhwsInstaller()
