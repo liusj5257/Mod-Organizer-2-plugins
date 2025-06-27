@@ -4,33 +4,9 @@ import uuid
 import struct
 import sys
 from typing import List, Dict
-from enum import IntEnum
-from collections import defaultdict
 from dataclasses import dataclass, field
 from ctypes import c_uint8, c_uint16, c_uint32, c_uint64
-from datetime import datetime
-
-
-class EIoContainerFlags(IntEnum):
-    NONE = 0x00
-    COMPRESSED = 0x01
-    ENCRYPTED = 0x02
-    SIGNED = 0x04
-    INDEXED = 0x08
-
-
-class EIoChunkType(IntEnum):
-    INVALID = 0
-    INSTALL_MANIFEST = 1
-    EXPORT_BUNDLE_DATA = 2
-    BULK_DATA = 3
-    OPTIONAL_BULK_DATA = 4
-    MEMORY_MAPPED_BULK_DATA = 5
-    LOADER_GLOBAL_META = 6
-    LOADER_INITIAL_LOAD_META = 7
-    LOADER_GLOBAL_NAMES = 8
-    LOADER_GLOBAL_NAME_HASHES = 9
-    CONTAINER_HEADER = 10
+import msvcrt  # 用于检测按键
 
 
 @dataclass
@@ -42,56 +18,11 @@ class FGuid:
 
 
 @dataclass
-class FIoStoreTocHeader:
-
-    magic: bytes = field(default=b"-==--==--==--==-")
-
-    version: c_uint8 = field(default=c_uint8(0))
-    reserved0: c_uint8 = field(default=c_uint8(0))
-    reserved00: c_uint16 = field(default=c_uint16(0))
-    # TOC 结构信息
-    TocHeaderSize: c_uint32 = field(default=c_uint32(0))
-    TocEntryCount: c_uint32 = field(default=c_uint32(0))
-    TocCompressedBlockEntryCount: c_uint32 = field(default=c_uint32(0))
-    TocCompressedBlockEntrySize: c_uint32 = field(default=c_uint32(0))
-    # 压缩信息
-    CompressionMethodNameCount: c_uint32 = field(default=c_uint32(0))
-    CompressionMethodNameLength: c_uint32 = field(default=c_uint32(0))
-    CompressionBlockSize: c_uint32 = field(default=c_uint32(0))
-    # 目录信息
-    DirectoryIndexSize: c_uint32 = field(default=c_uint32(0))
-    PartitionCount: c_uint32 = field(default=c_uint32(0))
-
-    # 容器标识
-    FIoContainerId: c_uint64 = field(default=c_uint64(0))
-    EncryptionKeyGuid: FGuid = field(default_factory=FGuid)
-
-    ContainerFlags: c_uint8 = field(default=c_uint8(0))
-    # 其他信息
-    Reserved1: c_uint8 = field(default=c_uint8(0))
-    Reserved2: c_uint16 = field(default=c_uint16(0))
-
-    TocChunkPerfectHashSeedsCount: c_uint32 = field(default=c_uint32(0))
-    PartitionSize: c_uint64 = field(default=c_uint64(0))
-    TocChunksWithoutPerfectHashCount: c_uint32 = field(default=c_uint32(0))
-
-    Reserved3: c_uint32 = field(default=c_uint32(0))
-    Reserved4: c_uint64 = field(default=c_uint64(0))
-    Reserved5: c_uint64 = field(default=c_uint64(0))
-    Reserved6: c_uint64 = field(default=c_uint64(0))
-    Reserved7: c_uint64 = field(default=c_uint64(0))
-    Reserved8: c_uint64 = field(default=c_uint64(0))
-
-    def __post_init__(self):
-        # 验证 magic 长度
-        if len(self.magic) != 16:
-            raise ValueError(f"magic must be 16 bytes, got {len(self.magic)} bytes")
-
-        # 自动转换整数到 ctypes 类型
-        if isinstance(self.version, int):
-            self.version = c_uint8(self.version)
-        if isinstance(self.FIoContainerId, int):
-            self.FIoContainerId = c_uint64(self.FIoContainerId)
+class Container:
+    name: str
+    container_id: int = 0
+    old_container_id: int = 0
+    package_ids: List[int] = field(default_factory=list)
 
 
 class UTOCParser:
@@ -99,17 +30,11 @@ class UTOCParser:
 
     def __init__(self, logger):
         self._logger = logger
-        self.parsed_data = defaultdict(list)
-
-        self._uint40_fmt = struct.Struct("<5B")
-        self._uint24_fmt = struct.Struct("<3B")
-
         self.reset_parser_state()
-        self.all_header = None
         self.container_ids = []
-        self.chunk_ids = []
-        self.Force = True
-        self.num = 0
+        self.package_ids: Dict[int, list] = {}
+        self.containers: Dict[str, Container] = {}
+        self.Force = False
 
     def reset_parser_state(self):
         """重置解析器状态，为解析新文件做准备"""
@@ -119,6 +44,7 @@ class UTOCParser:
         self.directory_index = b""
         self.entry_metas = []
         self.file_size = 0
+        self.container = None
 
     def generate_u64_id(self, ids: List[c_uint64]) -> c_uint64:
         """生成一个新的64位无符号整数ID"""
@@ -126,165 +52,41 @@ class UTOCParser:
             candidate = uuid.uuid4().int & 0xFFFFFFFFFFFFFFFF
             if candidate not in ids:
                 ids.append(c_uint64(candidate))
+                # candidate=0
                 return c_uint64(candidate)
         raise ValueError("无法生成唯一的64位无符号整数ID")
 
-    def parse_utoc(self, utoc_file: str):
-        """解析单个utoc文件"""
-        self.reset_parser_state()
-        base_name = os.path.basename(utoc_file)
-        ucas_file = utoc_file.replace(".utoc", ".ucas")
-        if base_name.endswith(".utoc"):
-            self._logger.debug(f"开始解析文件: {base_name}")
-            # try:
-            with open(utoc_file, "r+b") as utoc_f:
-                file_data = utoc_f.read()
-                self.file_size = len(file_data)
+    def find_and_replace_bytes(self, file_path, mappingId: Dict[int, int]):
+        """
+        在文件中搜索指定字节序列并替换，覆盖原文件
+        :param file_path: 文件路径
+        """
+        replacements = 0
+        with open(file_path, "rb") as f:
+            data = bytearray(f.read())
+        for old, new in mappingId.items():
+            search_bytes = old.to_bytes(8, "little")
+            replace_bytes = new.to_bytes(8, "little")
+            # 查找并替换所有匹配项
+            offset = 0
 
-                # 解析header
-                changed_contaniner_id = self._parse_header(file_data)
-                # 解析 ids
-                found = False
-                index = 0
-                newContainerId = 0
-                if changed_contaniner_id or self.Force:
-                    newContainerId = self.generate_u64_id(self.container_ids).value
-                    utoc_f.seek(56)
-                    utoc_f.write(struct.pack("<Q", newContainerId))
-                    for index in range(self.header["TocEntryCount"]):
-                        id, reverse1, reverse2, idtype = struct.unpack(
-                            "<QHBB",
-                            file_data[144 + index * 12 : 144 + (index + 1) * 12],
-                        )
-                        self._logger.debug(
-                            f"{id,idtype,index,self.header['FIoContainerId']}"
-                        )
-                        if id == self.header["FIoContainerId"]:
-                            if not idtype == 10:
-                                self._logger.error(f"container_id类型不符合{base_name}")
-                            utoc_f.seek(144 + index * 12)
-                            utoc_f.write(struct.pack("<Q", newContainerId))
-                            found = True
-                            break
-                    if not found:
-                        self._logger.error(f"未找到container_id{base_name}")
+            while offset < len(data):
+                found = data.find(search_bytes, offset)
+                if found == -1:
+                    break
+                data[found : found + len(search_bytes)] = replace_bytes
+                replacements += 1
+                offset = found + len(search_bytes)
 
-                    changed_ids = None
-                    # 获取对应的offset  length
-                    DataOffset = 144 + self.header["TocEntryCount"] * 12 + index * 10
-                    self._logger.debug(f"index= {index} DataOffset = {DataOffset}")
-                    offset_bytes = file_data[DataOffset : DataOffset + 5]
-                    length_bytes = file_data[DataOffset + 5 : DataOffset + 10]
+            # 覆盖原文件
+        if replacements > 0:
+            with open(file_path, "wb") as f:
+                f.write(data)
+            print(f"成功替换 {replacements} 处匹配项")
+        else:
+            print("未找到匹配字节序列")
 
-                    offset = int.from_bytes(offset_bytes, byteorder="big")
-                    length = int.from_bytes(length_bytes, byteorder="big")
-                    self._logger.debug(f"offset = {hex(offset)},length = {hex(length)}")
-
-                    # 计算CompressedBlock的index
-                    CompressionBlockSize = self.header["CompressionBlockSize"]
-                    FirstBlockIndex = offset // CompressionBlockSize
-                    LastBlockIndex = (
-                        offset + length + CompressionBlockSize - 1
-                    ) // CompressionBlockSize - 1
-
-                    self._logger.debug(
-                        f"FirstBlockIndex {FirstBlockIndex},LastBlockIndex {LastBlockIndex}"
-                    )
-                    # 获取对应的CompressedBlock
-                    DataOffset = (
-                        144
-                        + self.header["TocEntryCount"] * 12
-                        + self.header["TocEntryCount"] * 10
-                        + FirstBlockIndex * 12
-                    )
-                    offset_bytes = file_data[DataOffset : DataOffset + 5]
-                    size_bytes = file_data[DataOffset + 5 : DataOffset + 5 + 3]
-                    uncompressed_size_bytes = file_data[
-                        DataOffset + 5 + 3 : DataOffset + 5 + 3 + 3
-                    ]
-                    compresseion_method_size_bytes = file_data[
-                        DataOffset + 5 + 3 + 3 : DataOffset + 5 + 3 + 3 + 1
-                    ]
-                    offset = int.from_bytes(offset_bytes, byteorder="little")
-                    size = int.from_bytes(size_bytes, byteorder="little")
-                    self._logger.debug(f"ucas offset={offset}, size ={size} ")
-
-                    with open(ucas_file, "r+b") as ucas_f:
-                        ucas_f.seek(offset)
-                        ucas_f.write(struct.pack("<Q", newContainerId))
-                        ucas_f.close()
-                        self._logger.debug(f"更新ucas容器ID: {newContainerId}")
-
-                #     changed_ids = self._parse_chunk_ids(file_data[144:], utoc_f)
-                #     self._logger.debug(f"changed_ids\n {changed_ids} ")
-                #     if changed_ids:
-                #         self._logger.debug(f"需要替换 {len(changed_ids)} 个ChunkID")
-                #         with open(ucas_file, "r+b") as ucas_f:
-                #             ucas_data = ucas_f.read()
-                #             PackageIds_num = struct.unpack("<I", ucas_data[offset+28:offset+32])[0]
-                #             for i in range(PackageIds_num):
-                #                 offset2 =offset+ 32 + i * 8
-                #                 PackageId = struct.unpack(
-                #                     "<Q", ucas_data[offset2 : offset2 + 8]
-                #                 )[0]
-                #                 new_id = changed_ids[PackageId]
-                #                 ucas_f.seek(offset2)
-                #                 ucas_f.write(struct.pack("<Q", new_id))
-                #                 self._logger.debug(f"ucas : {PackageId} -> {new_id}")
-
-                #             ucas_f.close()
-                utoc_f.close()
-                self._logger.debug(f"container_ids\n{self.container_ids}")
-                if changed_contaniner_id or self.Force:
-                    self._logger.debug(f"处理完成: {base_name}")
-                    return True
-                else:
-                    self._logger.debug(f"无需处理: {base_name}")
-                    return False
-
-            # except Exception as e:
-            #     self._logger.error(f"解析失败: {base_name} - {str(e)}")
-            #     return False
-
-    def _parse_chunk_ids(self, data, file) -> Dict[int, int]:
-        """解析utoc文件中的chunk ids"""
-        id_mapping: Dict[int, int] = {}
-        added_ids = set()
-        PackageId_format = "<QHBB"
-        PackageId_size = struct.calcsize(PackageId_format)
-
-        for i in range(self.header["TocEntryCount"]):
-            PackageId = struct.unpack(PackageId_format, data[:PackageId_size])
-            ChunkId = PackageId[0]
-            ChunkType = PackageId[3]
-            data = data[PackageId_size:]
-            # 不需要修改的情况
-            if ChunkId not in self.chunk_ids and not self.Force:
-                if ChunkId not in added_ids:
-                    self.chunk_ids.append(ChunkId)
-                    added_ids.add(ChunkId)
-                    self._logger.debug(f"记录全新ChunkId: {ChunkId}")
-            # 需要修改的情况
-            if ChunkId not in added_ids and not ChunkType == 10:
-                # 检查是否已有映射关系
-                if ChunkId in id_mapping:
-                    new_ChunkId = id_mapping[ChunkId]
-                    self._logger.debug(f"使用现有映射: {ChunkId} -> {new_ChunkId}")
-                else:
-                    # 生成新ID并记录映射
-                    new_ChunkId = self.generate_u64_id(self.chunk_ids).value
-                    id_mapping[ChunkId] = new_ChunkId
-                    self._logger.debug(f"生成新ID映射: {ChunkId} -> {new_ChunkId}")
-
-                # 更新文件
-                file.seek(144 + i * PackageId_size)
-                file.write(struct.pack("<Q", new_ChunkId))
-            else:
-                self._logger.debug("文件携带多个不同type的相同id，无需处理跳过")
-
-        return id_mapping
-
-    def _parse_header(self, data):
+    def _parse_header(self, data, utoc_f) -> Dict[int, int]:
         """解析utoc文件头"""
         header_format = "<16s BBH 9I Q 4I BBH I Q I I 5Q"
         header_size = struct.calcsize(header_format)
@@ -330,87 +132,216 @@ class UTOCParser:
             raise ValueError(
                 f"无效的魔数: {self.header.magic.hex()}, 期望: {self.EXPECTED_MAGIC.hex()}"
             )
-        # 如果不存在则记录
-        if self.header["FIoContainerId"] in self.container_ids:
-            return True
+        # 如果已存在，则创建id
+        if self.header["FIoContainerId"] in self.container_ids or self.Force:
+            newContainerId = self.generate_u64_id(self.container_ids).value
+            # 写入新id
+            utoc_f.seek(56)
+            utoc_f.write(struct.pack("<Q", newContainerId))
+
+            # 记录id
+            self.container.old_container_id = self.header["FIoContainerId"]
+            self.container.container_id = newContainerId
+
+            return {self.header["FIoContainerId"]: newContainerId}
         else:
             self.container_ids.append(self.header["FIoContainerId"])
+            self.container.container_id = self.header["FIoContainerId"]
+            return None
+
+    def _parse_package_ids(self, data):
+        """解析utoc文件中的package ids"""
+        PackageId_format = "<QHBB"
+        PackageId_size = struct.calcsize(PackageId_format)
+        for i in range(self.header["TocEntryCount"]):
+            PackageId = struct.unpack(PackageId_format, data[:PackageId_size])
+            ChunkId = PackageId[0]
+            ChunkType = PackageId[3]
+            data = data[PackageId_size:]
+            self.container.package_ids.append(ChunkId)
+            if ChunkId not in self.package_ids:
+                self.package_ids[ChunkId] = []
+            if self.container.name not in self.package_ids[ChunkId]:
+                self.package_ids[ChunkId].append(self.container.name)
+        return None
+
+    def parse_utoc(self, utoc_file: str):
+        """解析单个utoc文件"""
+        self.reset_parser_state()
+        base_name = os.path.basename(utoc_file)
+        if not base_name.endswith(".utoc"):
+            return None, self.package_ids
+
+        ucas_file = utoc_file.replace(".utoc", ".ucas")
+        self._logger.debug(f"开始解析文件: {base_name}")
+        self.container = Container(base_name.split(".")[0])
+        try:
+            with open(utoc_file, "r+b") as utoc_f:
+                file_data = utoc_f.read()
+                self.file_size = len(file_data)
+
+                # 解析header
+                changed_container_id = self._parse_header(file_data, utoc_f)
+                toc_entry_count = self.header["TocEntryCount"]
+                compression_block_size = self.header["CompressionBlockSize"]
+
+                # 处理需要修改container ID的情况
+                if changed_container_id:
+                    found = False
+                    toc_entry_start = 144
+                    entry_size = 12
+
+                    # 搜索匹配的ID条目
+                    for index in range(toc_entry_count):
+                        entry_pos = toc_entry_start + index * entry_size
+                        id_bytes = file_data[entry_pos : entry_pos + entry_size]
+                        id_val, reverse1, reverse2, idtype = struct.unpack(
+                            "<QHBB", id_bytes
+                        )
+
+                        if id_val == self.container.old_container_id and idtype == 10:
+                            # 更新UTOC中的container ID
+                            utoc_f.seek(entry_pos)
+                            utoc_f.write(struct.pack("<Q", self.container.container_id))
+                            found = True
+                            break
+
+                    if not found:
+                        self._logger.error(f"未找到container_id {base_name}")
+                        return None, self.package_ids
+
+                    # 计算数据块位置
+                    toc_chunk_start = toc_entry_start + toc_entry_count * entry_size
+                    chunk_entry_pos = toc_chunk_start + index * 10
+
+                    # 读取数据块信息
+                    offset_bytes = file_data[chunk_entry_pos : chunk_entry_pos + 5]
+                    length_bytes = file_data[chunk_entry_pos + 5 : chunk_entry_pos + 10]
+                    offset_val = int.from_bytes(offset_bytes, byteorder="big")
+                    length_val = int.from_bytes(length_bytes, byteorder="big")
+
+                    # 计算压缩块索引
+                    first_block_idx = offset_val // compression_block_size
+                    last_block_idx = (
+                        offset_val + length_val + compression_block_size - 1
+                    ) // compression_block_size - 1
+
+                    # 获取压缩块信息
+                    compression_block_start = toc_chunk_start + toc_entry_count * 10
+                    block_entry_pos = compression_block_start + first_block_idx * 12
+                    block_offset = int.from_bytes(
+                        file_data[block_entry_pos : block_entry_pos + 5], "little"
+                    )
+
+                    # 更新UCAS文件的container_id
+                    with open(ucas_file, "r+b") as ucas_f:
+                        self._logger.debug(f"更新ucas容器ID: {self.container.container_id}")
+                        ucas_f.seek(block_offset)
+                        ucas_f.write(struct.pack("<Q", self.container.container_id))
+
+                # 解析package IDs
+                self._parse_package_ids(file_data[144:])
+        # 处理结果返回
+        except Exception as e:
+            self._logger.error(f"解析失败: {base_name} - {str(e)}")
             return False
 
-    def process_directory(self, directory_path: str):
-        """处理目录中的所有utoc文件"""
-        utoc_files = []
-        for filename in os.listdir(directory_path):
-            if filename.endswith(".utoc"):
-                full_path = os.path.join(directory_path, filename)
-                utoc_files.append(full_path)
+        if changed_container_id or self.Force:
+            msg = f"{self.container.name} {self.container.old_container_id}->{self.container.container_id}"
+            self._logger.debug(f"处理完成: {msg}")
+            return self.container, self.package_ids
 
-        if not utoc_files:
-            self._logger.info(f"在目录 {directory_path} 中未找到 .utoc 文件")
-            return
-
-        self._logger.info(f"找到 {len(utoc_files)} 个 .utoc 文件，开始处理...")
-        for file_path in utoc_files:
-            if self.parse_utoc(file_path):
-                self.num += 1
-        self._logger.info(f"处理完成! 成功修改了 {self.num} 个文件")
+        self._logger.debug(f"无需处理: {base_name}")
+        return None, self.package_ids
 
 
-def setup_logger(log_level=logging.INFO):
-    """配置日志记录器，同时输出到控制台和文件"""
-    logger = logging.getLogger("UTOCParser")
-    logger.setLevel(log_level)
 
-    # 创建格式化器
-    formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-    # 创建控制台处理器
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
-    console_handler.setLevel(log_level)
+def setup_logger():
+    """配置日志记录器"""
+    logger = logging.getLogger("StellarBlade_Chunk_Id_Patcher")
+    logger.setLevel(logging.DEBUG)
 
     # 创建文件处理器
-    log_file = os.path.join(os.getcwd(), "UTOCParser.log")
-    file_handler = logging.FileHandler(log_file, mode="w", encoding="utf-8")
-    file_handler.setFormatter(formatter)
+    file_handler = logging.FileHandler(
+        "StellarBlade_Chunk_Id_Patcher.log", encoding="utf-8"
+    )
     file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    file_handler.setFormatter(file_formatter)
+
+    # 创建控制台处理器
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_formatter = logging.Formatter("%(levelname)s - %(message)s")
+    console_handler.setFormatter(console_formatter)
 
     # 添加处理器到日志记录器
-    logger.addHandler(console_handler)
     logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
 
     return logger
 
 
-if __name__ == "__main__":
-    # 配置日志
-    logger = setup_logger(logging.DEBUG)
+def find_utoc_files(root_dir):
+    """查找所有utoc文件"""
+    utoc_files = []
+    for root, _, files in os.walk(root_dir):
+        for file in files:
+            if file.endswith(".utoc"):
+                utoc_files.append(os.path.join(root, file))
+    return utoc_files
 
-    # 创建解析器实例
-    parser = UTOCParser(logger)
 
-    # 处理当前目录
+def main():
+    """主函数"""
+    logger = setup_logger()
+    logger.info("=== StellarBlade Chunk Id Patcher 开始运行 ===")
+
+    # 获取当前工作目录
     current_dir = os.getcwd()
-
-    # 记录启动信息
-    logger.info("=" * 60)
-    logger.info(
-        f"UTOCParser 启动 - 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    )
     logger.info(f"工作目录: {current_dir}")
-    logger.info("=" * 60)
 
-    # 处理目录
-    parser.process_directory(current_dir)
+    # 查找所有utoc文件
+    utoc_files = find_utoc_files(current_dir)
+    logger.info(f"找到 {len(utoc_files)} 个 .utoc 文件")
 
-    # 添加结束提示
-    logger.info("=" * 60)
-    logger.info("处理完成! 按任意键退出...")
-    logger.info("=" * 60)
+    if not utoc_files:
+        logger.warning("未找到任何.utoc文件，程序退出")
+        wait_for_key()
+        return
 
-    # 等待用户输入后退出（仅适用于控制台模式）
-    if sys.stdout.isatty():  # 检查是否在控制台运行
-        input("按 Enter 键退出...")
+    # 解析utoc文件
+    parser = UTOCParser(logger)
+    containers = {}
+    packageid_conflicts = []
+
+    for file_path in utoc_files:
+        container, packageids = parser.parse_utoc(file_path)
+        if container:
+            containers[container.name] = container
+
+        # 检查package ID冲突
+    for k, v in containers.items():
+        self.num = self.num + 1
+        logger.info(f"{k}:{v.old_container_id}->{v.container_id}")
+    for k, v in packageids.items():
+        if len(v) > 1:
+            logger.warning(f"警告！修改相同资源 packageid = {k} :\n{v}")
+
+    # 输出结果摘要
+    logger.info("\n=== 处理结果摘要 ===")
+    logger.info(f"总共找到 {len(utoc_files)} 个Mod")
+    logger.info(f"成功处理 {len(containers)} 个 ContainerId 冲突")
+    logger.info("\n处理完成！")
+    wait_for_key()
+
+
+def wait_for_key():
+    """等待用户按任意键"""
+    print("\n按任意键退出...")
+    sys.stdout.flush()
+    msvcrt.getch()
+if __name__ == "__main__":
+    main()
