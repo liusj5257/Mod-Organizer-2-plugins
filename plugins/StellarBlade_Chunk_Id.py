@@ -237,8 +237,17 @@ class UTOCParser:
                 # 更新UCAS文件的container_id
                 with open(ucas_file, "r+b") as ucas_f:
                     self._logger.debug(f"更新ucas容器ID: {self.container.container_id}")
-                    ucas_f.seek(block_offset)
-                    ucas_f.write(struct.pack("<Q", self.container.container_id))
+                    ucas_data = ucas_f.read()
+                    read_container_id = int.from_bytes(
+                        ucas_data[block_offset : block_offset + 8]
+                    )
+                    if read_container_id == self.container.old_container_id:
+                        ucas_f.seek(block_offset)
+                        ucas_f.write(struct.pack("<Q", self.container.container_id))
+                self.find_and_replace_bytes(
+                    ucas_file,
+                    {self.container.old_container_id: self.container.container_id},
+                )
 
             # 解析package IDs
             self._parse_package_ids(file_data[144:])
